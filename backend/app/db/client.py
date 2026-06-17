@@ -34,6 +34,8 @@ class DatabaseClient:
         await self._db["reviews"].create_index([("repo_full_name", 1), ("pr_number", 1)])
         await self._db["team_style"].create_index("repo_full_name")
         await self._db["comment_feedback"].create_index("github_comment_id")
+        await self._db["threads"].create_index("github_comment_id", unique=True)
+        await self._db["threads"].create_index([("repo_full_name", 1), ("pr_number", 1)])
         logger.info("MongoDB indexes ensured")
 
     async def close(self):

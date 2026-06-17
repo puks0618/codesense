@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     github_webhook_secret: str
     github_client_id: str = ""
     github_client_secret: str = ""
+    github_app_slug: str = "codesense-reviewer"
     anthropic_api_key: str = ""
     openai_api_key: str = ""
     mongodb_uri: str

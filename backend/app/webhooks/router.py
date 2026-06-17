@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
@@ -234,9 +235,122 @@ async def handle_pr_merged(payload: dict):
         logger.error(f"handle_pr_merged failed: {e}", exc_info=True)
 
 
-async def handle_issue_comment(payload: dict):
-    logger.info("issue_comment handler — not yet implemented (Phase 5)")
-
-
 async def handle_review_comment(payload: dict):
-    logger.info("pull_request_review_comment handler — not yet implemented (Phase 5)")
+    try:
+        comment = payload["comment"]
+        comment_id: int = comment["id"]
+        comment_body: str = comment["body"]
+        comment_login: str = comment["user"]["login"]
+        in_reply_to_id: Optional[int] = comment.get("in_reply_to_id")
+        file_path: str = comment.get("path", "")
+        diff_hunk: str = comment.get("diff_hunk", "")
+        pr_number: int = payload["pull_request"]["number"]
+        repo_full_name: str = payload["repository"]["full_name"]
+        installation_id: int = payload["installation"]["id"]
+
+        bot_login = f"{settings.github_app_slug}[bot]"
+
+        # When our own bot posts a review comment, GitHub sends us a webhook for it.
+        # Store it in threads so developers can reply to it.
+        if comment_login == bot_login:
+            if in_reply_to_id is None:
+                # Top-level CodeSense comment — seed the thread
+                try:
+                    threads_col = db_client.get_collection("threads")
+                    await threads_col.update_one(
+                        {"github_comment_id": comment_id},
+                        {"$setOnInsert": {
+                            "github_comment_id": comment_id,
+                            "repo_full_name": repo_full_name,
+                            "pr_number": pr_number,
+                            "file_path": file_path,
+                            "original_code_context": diff_hunk,
+                            "original_comment": comment_body,
+                            "turns": [],
+                            "created_at": datetime.now(timezone.utc),
+                        }},
+                        upsert=True,
+                    )
+                    logger.info(f"Stored thread seed for comment {comment_id} on {repo_full_name}#{pr_number}")
+                except Exception as e:
+                    logger.error(f"Failed to store thread seed: {e}", exc_info=True)
+            return  # Never respond to our own comments
+
+        # Developer comment — only handle replies to our comments
+        if in_reply_to_id is None:
+            logger.debug("Ignoring top-level human review comment (not a reply)")
+            return
+
+        try:
+            threads_col = db_client.get_collection("threads")
+            thread = await threads_col.find_one({"github_comment_id": in_reply_to_id})
+        except Exception as e:
+            logger.error(f"Thread lookup failed: {e}", exc_info=True)
+            return
+
+        if thread is None:
+            logger.debug(f"Comment {in_reply_to_id} is not a CodeSense thread — ignoring")
+            return
+
+        # Developer is replying to one of our comments — respond
+        from app.llm.reviewer import LLMReviewer
+        reviewer = LLMReviewer()
+        try:
+            response_text = await asyncio.to_thread(
+                reviewer.respond_to_thread,
+                thread["original_code_context"],
+                thread["original_comment"],
+                thread.get("turns", []),
+                comment_body,
+            )
+        except Exception as e:
+            logger.error(f"respond_to_thread failed: {e}", exc_info=True)
+            return
+
+        # Post the reply to GitHub
+        client = GitHubClient(installation_id)
+        try:
+            reply = await client.post_review_comment_reply(
+                repo_full_name, pr_number, comment_id, response_text
+            )
+            reply_comment_id = reply.get("id")
+        except Exception as e:
+            logger.error(f"Failed to post reply comment: {e}", exc_info=True)
+            return
+
+        # Update thread turns
+        now = datetime.now(timezone.utc)
+        new_turns = [
+            {"role": "developer", "content": comment_body, "github_comment_id": comment_id, "created_at": now},
+            {"role": "codesense", "content": response_text, "github_comment_id": reply_comment_id, "created_at": now},
+        ]
+        try:
+            await threads_col.update_one(
+                {"github_comment_id": in_reply_to_id},
+                {"$push": {"turns": {"$each": new_turns}}},
+            )
+        except Exception as e:
+            logger.error(f"Failed to update thread turns: {e}", exc_info=True)
+
+        logger.info(f"Responded to thread {in_reply_to_id} on {repo_full_name}#{pr_number}")
+
+    except Exception as e:
+        logger.error(f"handle_review_comment failed: {e}", exc_info=True)
+
+
+async def handle_issue_comment(payload: dict):
+    try:
+        comment = payload["comment"]
+        comment_login: str = comment["user"]["login"]
+        bot_login = f"{settings.github_app_slug}[bot]"
+
+        if comment_login == bot_login:
+            return  # Prevent infinite loops
+
+        # Issue comments are general PR comments — no thread lookup (no in_reply_to_id)
+        logger.info(
+            f"issue_comment by {comment_login} on "
+            f"{payload['repository']['full_name']} — no thread action"
+        )
+    except Exception as e:
+        logger.error(f"handle_issue_comment failed: {e}", exc_info=True)

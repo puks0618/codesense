@@ -141,3 +141,12 @@ class GitHubClient:
         resp = await self._request("GET", url)
         resp.raise_for_status()
         return resp.json()
+
+    async def post_review_comment_reply(
+        self, repo_full_name: str, pr_number: int, comment_id: int, body: str
+    ) -> dict:
+        url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/comments/{comment_id}/replies"
+        resp = await self._request("POST", url, json={"body": body})
+        resp.raise_for_status()
+        logger.info(f"Posted reply to comment {comment_id} on {repo_full_name}#{pr_number}")
+        return resp.json()

@@ -150,3 +150,62 @@ def test_generate_summary_comment_on_suggestions_only():
     diff = DiffResult(files=[], total_additions=10, total_deletions=0)
     _, verdict = reviewer.generate_summary(comments, diff)
     assert verdict == "COMMENT"
+
+
+@patch("app.llm.reviewer.anthropic.Anthropic")
+def test_respond_to_thread_first_reply_starts_with_user(mock_anthropic_cls):
+    mock_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_client
+    mock_client.messages.create.return_value = _make_mock_message("Here's how to fix it.")
+
+    reviewer = LLMReviewer()
+    result = reviewer.respond_to_thread(
+        original_code="def foo(): pass",
+        original_comment="This function lacks a return type hint.",
+        thread_history=[],
+        developer_message="How do I fix this?",
+    )
+
+    assert result == "Here's how to fix it."
+    call_kwargs = mock_client.messages.create.call_args[1]
+    messages = call_kwargs["messages"]
+    # Must start with user (Anthropic API requirement)
+    assert messages[0]["role"] == "user"
+    assert messages[-1]["role"] == "user"
+    assert "How do I fix this?" in messages[-1]["content"]
+
+
+@patch("app.llm.reviewer.anthropic.Anthropic")
+def test_respond_to_thread_reconstructs_history(mock_anthropic_cls):
+    mock_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_client
+    mock_client.messages.create.return_value = _make_mock_message("Glad that helps!")
+
+    history = [
+        {"role": "developer", "content": "Why is this a security issue?"},
+        {"role": "codesense", "content": "Because user input is interpolated directly."},
+    ]
+
+    reviewer = LLMReviewer()
+    reviewer.respond_to_thread("code", "original comment", history, "OK, I'll fix it.")
+
+    call_kwargs = mock_client.messages.create.call_args[1]
+    messages = call_kwargs["messages"]
+    # history[0]=user, history[1]=assistant, new_dev_msg=user
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[1]["role"] == "assistant"
+    assert messages[2]["role"] == "user"
+    assert "OK, I'll fix it." in messages[2]["content"]
+
+
+@patch("app.llm.reviewer.anthropic.Anthropic")
+def test_respond_to_thread_api_error_returns_fallback(mock_anthropic_cls):
+    mock_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_client
+    mock_client.messages.create.side_effect = Exception("API timeout")
+
+    reviewer = LLMReviewer()
+    result = reviewer.respond_to_thread("code", "comment", [], "help?")
+
+    assert "error" in result.lower()

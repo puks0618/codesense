@@ -223,7 +223,8 @@ class LLMReviewer:
         thread_history: list,
         developer_message: str,
     ) -> str:
-        messages = [{"role": "assistant", "content": original_comment}]
+        # Build message list — must start with user role (Anthropic API requirement)
+        messages = []
         for turn in thread_history:
             role = "user" if turn["role"] == "developer" else "assistant"
             messages.append({"role": role, "content": turn["content"]})
@@ -233,6 +234,7 @@ class LLMReviewer:
             "You are CodeSense, an expert code reviewer. You are in a conversation with a developer "
             "about a specific code issue you flagged. Be helpful, specific, and concise. "
             "If asked for a fix, provide a concrete corrected code block. "
+            f"Your original review comment: {original_comment}\n\n"
             f"The code in question:\n\n```\n{original_code}\n```"
         )
 
