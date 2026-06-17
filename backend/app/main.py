@@ -35,3 +35,16 @@ app.include_router(webhooks_router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "codesense"}
+
+
+@app.get("/debug/github-auth")
+async def debug_github_auth():
+    """Temporary debug endpoint — remove after diagnosis."""
+    import traceback
+    try:
+        from app.github.client import GitHubClient
+        client = GitHubClient(140933129)
+        token = await client._get_installation_token()
+        return {"status": "ok", "token_prefix": token[:10]}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
