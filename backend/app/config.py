@@ -17,8 +17,17 @@ class Settings(BaseSettings):
     @field_validator("github_private_key")
     @classmethod
     def fix_private_key(cls, v: str) -> str:
-        # Railway stores multiline env vars with literal \n — convert back
-        return v.replace("\\n", "\n")
+        # Railway may store the PEM with literal \n sequences — convert them back
+        v = v.replace("\\n", "\n")
+        # If the key still has no real newlines (all on one line), reconstruct it:
+        # strip the header/footer, split the base64 into 64-char lines, re-wrap
+        if "\n" not in v:
+            header = "-----BEGIN RSA PRIVATE KEY-----"
+            footer = "-----END RSA PRIVATE KEY-----"
+            body = v.replace(header, "").replace(footer, "").strip()
+            lines = [body[i:i+64] for i in range(0, len(body), 64)]
+            v = header + "\n" + "\n".join(lines) + "\n" + footer + "\n"
+        return v
 
     model_config = {"env_file": ".env", "case_sensitive": False}
 
