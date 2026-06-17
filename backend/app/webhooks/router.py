@@ -45,6 +45,10 @@ async def github_webhook(
         background_tasks.add_task(handle_issue_comment, payload)
     elif x_github_event == "pull_request_review_comment" and action == "created":
         background_tasks.add_task(handle_review_comment, payload)
+    elif x_github_event == "pull_request_review_comment" and action == "deleted":
+        background_tasks.add_task(handle_review_comment_deleted, payload)
+    elif x_github_event == "pull_request_review_comment_reaction" and action == "created":
+        background_tasks.add_task(handle_reaction, payload)
     else:
         logger.info(f"Ignoring unhandled event: {x_github_event}/{action}")
 
@@ -278,7 +282,10 @@ async def handle_review_comment(payload: dict):
 
         # Developer comment — only handle replies to our comments
         if in_reply_to_id is None:
-            logger.debug("Ignoring top-level human review comment (not a reply)")
+            # Top-level human comment on a PR CodeSense reviewed — ingest as team style
+            await _ingest_team_style_comment(
+                repo_full_name, pr_number, comment_id, diff_hunk, comment_body, comment_login
+            )
             return
 
         try:
@@ -354,3 +361,170 @@ async def handle_issue_comment(payload: dict):
         )
     except Exception as e:
         logger.error(f"handle_issue_comment failed: {e}", exc_info=True)
+
+
+async def _ingest_team_style_comment(
+    repo_full_name: str,
+    pr_number: int,
+    comment_id: int,
+    diff_hunk: str,
+    comment_body: str,
+    reviewer_login: str,
+) -> None:
+    """Store a human review comment as a team style example if CodeSense reviewed this PR."""
+    try:
+        reviews_col = db_client.get_collection("reviews")
+        review = await reviews_col.find_one(
+            {"repo_full_name": repo_full_name, "pr_number": pr_number}
+        )
+        if review is None:
+            logger.debug(
+                f"Skipping team style ingestion for {repo_full_name}#{pr_number} — no CodeSense review"
+            )
+            return
+
+        # Use the last 10 lines of the diff hunk as the code context
+        hunk_lines = diff_hunk.strip().split("\n")
+        code_context = "\n".join(hunk_lines[-10:])
+
+        from app.indexer.embedder import EmbeddingGenerator
+        embedder = EmbeddingGenerator()
+        try:
+            embedding = await asyncio.to_thread(embedder.embed_single, code_context)
+        except Exception as e:
+            logger.error(f"Failed to embed team style comment: {e}")
+            return
+
+        team_style_col = db_client.get_collection("team_style")
+        await team_style_col.update_one(
+            {"github_comment_id": comment_id},
+            {"$setOnInsert": {
+                "github_comment_id": comment_id,
+                "repo_full_name": repo_full_name,
+                "pr_number": pr_number,
+                "code_context": code_context,
+                "comment_body": comment_body,
+                "reviewer_login": reviewer_login,
+                "embedding": embedding,
+                "created_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        logger.info(
+            f"Ingested team style comment {comment_id} from {reviewer_login} on {repo_full_name}#{pr_number}"
+        )
+    except Exception as e:
+        logger.error(f"Team style ingestion failed: {e}", exc_info=True)
+
+
+async def handle_review_comment_deleted(payload: dict):
+    """Track deleted CodeSense comments as implicit negative feedback."""
+    try:
+        comment = payload["comment"]
+        comment_id: int = comment["id"]
+        repo_full_name: str = payload["repository"]["full_name"]
+
+        threads_col = db_client.get_collection("threads")
+        thread = await threads_col.find_one({"github_comment_id": comment_id})
+        if thread is None:
+            return  # Not a CodeSense comment — nothing to track
+
+        reactor_login: str = payload.get("sender", {}).get("login", "")
+        feedback_col = db_client.get_collection("comment_feedback")
+        await feedback_col.update_one(
+            {"github_comment_id": comment_id, "reaction": "deleted"},
+            {"$setOnInsert": {
+                "github_comment_id": comment_id,
+                "repo_full_name": repo_full_name,
+                "reaction": "deleted",
+                "reactor_login": reactor_login,
+                "category": None,
+                "created_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        logger.info(f"Recorded deletion of CodeSense comment {comment_id} on {repo_full_name}")
+        await _check_negative_signal_threshold(repo_full_name, feedback_col)
+    except Exception as e:
+        logger.error(f"handle_review_comment_deleted failed: {e}", exc_info=True)
+
+
+async def handle_reaction(payload: dict):
+    """Track 👎 reactions on CodeSense comments for quality feedback.
+
+    Requires the GitHub App to have 'Reactions' Read permission and the
+    pull_request_review_comment_reaction webhook event subscribed.
+    """
+    try:
+        if payload.get("action") != "created":
+            return
+
+        reaction_content: str = payload.get("reaction", {}).get("content", "")
+        if reaction_content != "-1":
+            return  # Only track thumbs-down
+
+        comment = payload.get("pull_request_review_comment") or payload.get("comment", {})
+        comment_id: int = comment.get("id")
+        if not comment_id:
+            return
+
+        repo_full_name: str = payload["repository"]["full_name"]
+        reactor_login: str = payload.get("reaction", {}).get("user", {}).get("login", "")
+
+        threads_col = db_client.get_collection("threads")
+        thread = await threads_col.find_one({"github_comment_id": comment_id})
+        if thread is None:
+            return  # Not a CodeSense comment
+
+        # Best-effort: look up the comment's category from stored reviews
+        category: Optional[str] = None
+        try:
+            reviews_col = db_client.get_collection("reviews")
+            pr_number: int = thread.get("pr_number")
+            review = await reviews_col.find_one(
+                {"repo_full_name": repo_full_name, "pr_number": pr_number}
+            )
+            if review:
+                for c in review.get("comments", []):
+                    if c.get("github_comment_id") == comment_id:
+                        category = c.get("category")
+                        break
+        except Exception:
+            pass
+
+        feedback_col = db_client.get_collection("comment_feedback")
+        await feedback_col.update_one(
+            {"github_comment_id": comment_id, "reaction": "-1", "reactor_login": reactor_login},
+            {"$setOnInsert": {
+                "github_comment_id": comment_id,
+                "repo_full_name": repo_full_name,
+                "reaction": "-1",
+                "reactor_login": reactor_login,
+                "category": category,
+                "created_at": datetime.now(timezone.utc),
+            }},
+            upsert=True,
+        )
+        logger.info(f"Recorded 👎 on CodeSense comment {comment_id} from {reactor_login}")
+        await _check_negative_signal_threshold(repo_full_name, feedback_col, category=category)
+    except Exception as e:
+        logger.error(f"handle_reaction failed: {e}", exc_info=True)
+
+
+async def _check_negative_signal_threshold(
+    repo_full_name: str, feedback_col, category: Optional[str] = None
+) -> None:
+    """Log a warning when 5+ thumbs-down accumulate for a repo (optionally per category)."""
+    try:
+        query: dict = {"repo_full_name": repo_full_name, "reaction": "-1"}
+        if category:
+            query["category"] = category
+        count = await feedback_col.count_documents(query)
+        if count >= 5:
+            cat_msg = f" for category '{category}'" if category else ""
+            logger.warning(
+                f"Quality signal: {count} negative reactions on {repo_full_name}{cat_msg}. "
+                "Consider adjusting review sensitivity for this category."
+            )
+    except Exception as e:
+        logger.error(f"Negative signal threshold check failed: {e}", exc_info=True)

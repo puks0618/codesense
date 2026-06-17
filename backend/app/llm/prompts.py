@@ -29,6 +29,7 @@ CHANGED CODE (+ = added lines, - = removed lines):
 {diff}
 
 {context_section}
+{team_style_section}
 
 Respond with ONLY a valid JSON object in this exact format. No markdown, no explanation, just JSON:
 {{

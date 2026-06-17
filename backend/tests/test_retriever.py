@@ -171,3 +171,64 @@ async def test_find_related_chunks_handles_embedding_error_gracefully(mock_embed
         "def foo(): pass", "owner/repo", "src/foo.py"
     )
     assert results == []
+
+
+# ---------------------------------------------------------------------------
+# find_similar_team_comments tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@patch("app.retriever.vector_search.db_client")
+@patch("app.retriever.vector_search.EmbeddingGenerator")
+async def test_find_similar_team_comments_returns_empty_for_blank_query(mock_embedder_cls, mock_db):
+    from app.retriever.vector_search import CodeRetriever
+
+    retriever = CodeRetriever()
+    results = await retriever.find_similar_team_comments("   ", "owner/repo")
+    assert results == []
+    mock_db.get_collection.assert_not_called()
+
+
+@pytest.mark.asyncio
+@patch("app.retriever.vector_search.db_client")
+@patch("app.retriever.vector_search.EmbeddingGenerator")
+async def test_find_similar_team_comments_filters_by_score_threshold(mock_embedder_cls, mock_db):
+    from app.retriever.vector_search import CodeRetriever
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_single.return_value = [0.1] * 1536
+    mock_embedder_cls.return_value = mock_embedder
+
+    raw_results = [
+        {"code_context": "x = 1", "comment_body": "Use a constant", "reviewer_login": "alice", "score": 0.85},
+        {"code_context": "y = 2", "comment_body": "Magic number", "reviewer_login": "bob", "score": 0.60},
+    ]
+    mock_cursor = MagicMock()
+    mock_cursor.to_list = AsyncMock(return_value=raw_results)
+    mock_col = MagicMock()
+    mock_col.aggregate.return_value = mock_cursor
+    mock_db.get_collection.return_value = mock_col
+
+    retriever = CodeRetriever()
+    results = await retriever.find_similar_team_comments("x = 1", "owner/repo")
+    assert len(results) == 1
+    assert results[0]["comment_body"] == "Use a constant"
+
+
+@pytest.mark.asyncio
+@patch("app.retriever.vector_search.db_client")
+@patch("app.retriever.vector_search.EmbeddingGenerator")
+async def test_find_similar_team_comments_returns_empty_on_db_error(mock_embedder_cls, mock_db):
+    from app.retriever.vector_search import CodeRetriever
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_single.return_value = [0.1] * 1536
+    mock_embedder_cls.return_value = mock_embedder
+
+    mock_col = MagicMock()
+    mock_col.aggregate.side_effect = Exception("Atlas unavailable")
+    mock_db.get_collection.return_value = mock_col
+
+    retriever = CodeRetriever()
+    results = await retriever.find_similar_team_comments("def foo(): pass", "owner/repo")
+    assert results == []
