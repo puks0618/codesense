@@ -21,8 +21,9 @@ class DatabaseClient:
             await self._create_indexes()
             logger.info("Connected to MongoDB Atlas")
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
-            raise
+            logger.error(f"Failed to connect to MongoDB: {e}. App will start but DB operations will fail.")
+            self._client = None
+            self._db = None
 
     async def _create_indexes(self):
         await self._db["code_chunks"].create_index(
