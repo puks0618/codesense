@@ -8,7 +8,7 @@ import anthropic
 
 from app.config import settings
 from app.github.models import DiffResult
-from app.llm.prompts import CONTEXT_SECTION_TEMPLATE, REVIEW_USER_PROMPT, SYSTEM_PROMPT
+from app.llm.prompts import CONTEXT_SECTION_TEMPLATE, REVIEW_USER_PROMPT, SYSTEM_PROMPT, TEAM_STYLE_SECTION
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ class LLMReviewer:
         pr_title: str,
         pr_body: str,
         context_chunks: Optional[list] = None,
+        team_style_chunks: Optional[list] = None,
     ) -> dict:
         if _should_skip(file_path):
             logger.debug(f"Skipping {file_path} (skip pattern match)")
@@ -117,6 +118,14 @@ class LLMReviewer:
             )
             context_section = CONTEXT_SECTION_TEMPLATE.format(retrieved_chunks=chunks_text)
 
+        team_style_section = ""
+        if team_style_chunks:
+            examples = "\n\n".join(
+                f"Code:\n```\n{c['code_context']}\n```\nReviewer comment: {c['comment_body']}"
+                for c in team_style_chunks
+            )
+            team_style_section = TEAM_STYLE_SECTION.format(examples=examples)
+
         prompt = REVIEW_USER_PROMPT.format(
             file_path=file_path,
             language=language,
@@ -124,6 +133,7 @@ class LLMReviewer:
             pr_body=pr_body or "(no description)",
             diff=diff + ("\n\n[DIFF TRUNCATED — file too large]" if truncated else ""),
             context_section=context_section,
+            team_style_section=team_style_section,
         )
 
         try:

@@ -153,6 +153,24 @@ def test_generate_summary_comment_on_suggestions_only():
 
 
 @patch("app.llm.reviewer.anthropic.Anthropic")
+def test_review_file_includes_team_style_section(mock_anthropic_cls):
+    mock_client = MagicMock()
+    mock_anthropic_cls.return_value = mock_client
+    mock_client.messages.create.return_value = _make_mock_message(VALID_LLM_RESPONSE)
+
+    team_chunks = [
+        {"code_context": "cursor.execute(query)", "comment_body": "Use parameterized queries."}
+    ]
+    reviewer = LLMReviewer()
+    reviewer.review_file("service.py", SAMPLE_DIFF, "Fix auth", "", team_style_chunks=team_chunks)
+
+    call_kwargs = mock_client.messages.create.call_args[1]
+    prompt = call_kwargs["messages"][0]["content"]
+    assert "TEAM STYLE EXAMPLES" in prompt
+    assert "Use parameterized queries." in prompt
+
+
+@patch("app.llm.reviewer.anthropic.Anthropic")
 def test_respond_to_thread_first_reply_starts_with_user(mock_anthropic_cls):
     mock_client = MagicMock()
     mock_anthropic_cls.return_value = mock_client

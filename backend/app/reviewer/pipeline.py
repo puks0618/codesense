@@ -48,6 +48,7 @@ class ReviewPipeline:
             context_chunks = await self._get_context(
                 f.filename, f.patch, pr_event.repo_full_name
             )
+            team_style_chunks = await self._get_team_style(f.patch, pr_event.repo_full_name)
             result = await asyncio.to_thread(
                 self._reviewer.review_file,
                 f.filename,
@@ -55,6 +56,7 @@ class ReviewPipeline:
                 pr_event.pr_title,
                 pr_event.pr_body,
                 context_chunks or None,
+                team_style_chunks or None,
             )
             for comment in result.get("comments", []):
                 comment["file_path"] = f.filename
@@ -103,3 +105,13 @@ class ReviewPipeline:
             logger.warning(f"Caller/callee search failed for {file_path}: {e}")
 
         return context_chunks[:MAX_CONTEXT_CHUNKS]
+
+    async def _get_team_style(self, patch: str, repo: str) -> list[dict]:
+        added_code = _extract_added_code(patch)
+        if not added_code.strip():
+            return []
+        try:
+            return await self._retriever.find_similar_team_comments(added_code, repo)
+        except Exception as e:
+            logger.warning(f"Team style retrieval failed: {e}")
+            return []
