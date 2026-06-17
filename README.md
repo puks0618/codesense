@@ -2,4 +2,4 @@
 
 AI-powered GitHub PR reviewer.
 
-<!-- Phase 1 final verification -->
+<!-- Phase 2 test: intentional bugs below -->
