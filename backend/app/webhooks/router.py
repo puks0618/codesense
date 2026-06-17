@@ -35,6 +35,10 @@ async def github_webhook(
 
     if x_github_event == "pull_request" and action in ("opened", "synchronize"):
         background_tasks.add_task(handle_pull_request, payload)
+    elif x_github_event == "pull_request" and action == "closed" and payload.get("pull_request", {}).get("merged"):
+        background_tasks.add_task(handle_pr_merged, payload)
+    elif x_github_event in ("installation", "installation_repositories") and action in ("created", "added"):
+        background_tasks.add_task(handle_installation, payload)
     elif x_github_event == "issue_comment" and action == "created":
         background_tasks.add_task(handle_issue_comment, payload)
     elif x_github_event == "pull_request_review_comment" and action == "created":
@@ -179,6 +183,41 @@ async def handle_pull_request(payload: dict):
 def _now_ms() -> int:
     import time
     return int(time.time() * 1000)
+
+
+async def handle_installation(payload: dict):
+    try:
+        from app.indexer.parser import RepositoryIndexer
+        installation_id = payload["installation"]["id"]
+        repos = payload.get("repositories") or payload.get("repositories_added", [])
+        client = GitHubClient(installation_id)
+        indexer = RepositoryIndexer()
+        for repo in repos:
+            repo_full_name = repo["full_name"]
+            logger.info(f"Indexing newly installed repo: {repo_full_name}")
+            try:
+                summary = await indexer.index_repository(repo_full_name, client)
+                logger.info(f"Indexing complete for {repo_full_name}: {summary}")
+            except Exception as e:
+                logger.error(f"Indexing failed for {repo_full_name}: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"handle_installation failed: {e}", exc_info=True)
+
+
+async def handle_pr_merged(payload: dict):
+    try:
+        from app.indexer.parser import RepositoryIndexer
+        repo_full_name = payload["repository"]["full_name"]
+        pr_number = payload["pull_request"]["number"]
+        installation_id = payload["installation"]["id"]
+        logger.info(f"PR #{pr_number} merged on {repo_full_name} — updating index")
+        client = GitHubClient(installation_id)
+        diff_result = await client.get_pr_diff(repo_full_name, pr_number)
+        indexer = RepositoryIndexer()
+        await indexer.index_pr_changes(repo_full_name, diff_result.files, client)
+        logger.info(f"Index updated for {repo_full_name} after PR #{pr_number} merge")
+    except Exception as e:
+        logger.error(f"handle_pr_merged failed: {e}", exc_info=True)
 
 
 async def handle_issue_comment(payload: dict):
