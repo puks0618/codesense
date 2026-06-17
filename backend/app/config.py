@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     mongodb_uri: str
     port: int = 8000
     railway_url: str = ""
+    jwt_secret: str = "dev-secret-change-in-production"
+    frontend_url: str = "http://localhost:3000"
 
     @field_validator("github_private_key")
     @classmethod

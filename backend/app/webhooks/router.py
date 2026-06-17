@@ -172,6 +172,7 @@ async def handle_pull_request(payload: dict):
                         "status": "completed",
                         "comments": all_comments,
                         "summary": summary,
+                        "verdict": verdict,
                         "review_duration_ms": duration_ms,
                     }}
                 )
