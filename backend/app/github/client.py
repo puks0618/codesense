@@ -26,7 +26,7 @@ class GitHubClient:
         payload = {
             "iat": now - 60,
             "exp": now + 540,  # 9 minutes (max is 10)
-            "iss": settings.github_app_id,
+            "iss": str(settings.github_app_id),  # PyJWT requires string
         }
         return jwt.encode(payload, settings.github_private_key, algorithm="RS256")
 
