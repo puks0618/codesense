@@ -8,7 +8,8 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from app.config import settings
 from app.db.client import db_client
 from app.github.client import GitHubClient
-from app.llm.reviewer import LLMReviewer
+from app.github.models import PREvent
+from app.reviewer.pipeline import ReviewPipeline
 from app.webhooks.signature import verify_github_signature
 
 logger = logging.getLogger(__name__)
@@ -110,9 +111,22 @@ async def handle_pull_request(payload: dict):
                 total_deletions=sum(f.deletions for f in files),
             )
 
-        reviewer = LLMReviewer()
-        all_comments = reviewer.review_pr(diff_result, pr_title, pr_body)
-        summary, verdict = reviewer.generate_summary(all_comments, diff_result)
+        pr_event = PREvent(
+            pr_number=pr_number,
+            repo_full_name=repo_full_name,
+            installation_id=installation_id,
+            head_sha=commit_sha,
+            base_sha=payload["pull_request"]["base"]["sha"],
+            pr_title=pr_title,
+            pr_body=pr_body,
+            author_login=payload["pull_request"]["user"]["login"],
+        )
+
+        pipeline = ReviewPipeline()
+        result = await pipeline.run(pr_event, diff_result)
+        all_comments = result["comments"]
+        summary = result["summary"]
+        verdict = result["verdict"]
 
         duration_ms = _now_ms() - start_ms
         logger.info(f"PR #{pr_number}: {len(all_comments)} comments, verdict={verdict}, "
