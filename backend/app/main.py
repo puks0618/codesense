@@ -41,14 +41,10 @@ async def health():
 async def debug_github_auth():
     """Temporary debug endpoint — remove after diagnosis."""
     import traceback
-    from app.config import settings
-    key = settings.github_private_key
-    return {
-        "key_length": len(key),
-        "has_begin": "-----BEGIN RSA PRIVATE KEY-----" in key,
-        "has_end": "-----END RSA PRIVATE KEY-----" in key,
-        "newline_count": key.count("\n"),
-        "literal_backslash_n_count": key.count("\\n"),
-        "first_60": repr(key[:60]),
-        "last_60": repr(key[-60:]),
-    }
+    try:
+        from app.github.client import GitHubClient
+        client = GitHubClient(140933129)
+        token = await client._get_installation_token()
+        return {"status": "ok", "token_prefix": token[:12] + "..."}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
