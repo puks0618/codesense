@@ -1,10 +1,14 @@
+import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 
 from app.config import settings
+from app.db.client import db_client
 from app.github.client import GitHubClient
+from app.llm.reviewer import LLMReviewer
 from app.webhooks.signature import verify_github_signature
 
 logger = logging.getLogger(__name__)
@@ -42,29 +46,139 @@ async def github_webhook(
 
 
 async def handle_pull_request(payload: dict):
+    repo_full_name = payload["repository"]["full_name"]
+    pr_number = payload["pull_request"]["number"]
+    installation_id = payload["installation"]["id"]
+    commit_sha = payload["pull_request"]["head"]["sha"]
+    pr_title = payload["pull_request"]["title"]
+    pr_body = payload["pull_request"].get("body") or ""
+
+    logger.info(f"Reviewing PR #{pr_number} on {repo_full_name} @ {commit_sha[:8]}")
+
+    review_doc = {
+        "repo_full_name": repo_full_name,
+        "pr_number": pr_number,
+        "pr_title": pr_title,
+        "commit_sha": commit_sha,
+        "status": "pending",
+        "comments": [],
+        "summary": "",
+        "overall_score": 0,
+        "review_duration_ms": 0,
+        "created_at": datetime.now(timezone.utc),
+    }
+    review_id = None
+
     try:
-        repo_full_name = payload["repository"]["full_name"]
-        pr_number = payload["pull_request"]["number"]
-        installation_id = payload["installation"]["id"]
+        reviews_col = db_client.get_collection("reviews")
+        insert_result = await reviews_col.insert_one(review_doc)
+        review_id = insert_result.inserted_id
+    except Exception:
+        logger.warning("MongoDB unavailable — proceeding without persistence")
 
-        logger.info(f"Handling PR #{pr_number} on {repo_full_name}")
+    client = GitHubClient(installation_id)
 
-        client = GitHubClient(installation_id)
+    try:
+        start_ms = _now_ms()
+
         diff_result = await client.get_pr_diff(repo_full_name, pr_number)
-
         logger.info(f"PR #{pr_number}: {len(diff_result.files)} reviewable files, "
                     f"+{diff_result.total_additions}/-{diff_result.total_deletions} lines")
 
-        await client.post_comment(
-            repo_full_name,
-            pr_number,
-            "**CodeSense** is analyzing this PR. Review will appear shortly.",
-        )
+        if not diff_result.files:
+            await client.post_comment(repo_full_name, pr_number,
+                                      "**CodeSense**: No reviewable files found in this PR.")
+            return
 
-        logger.info(f"Posted stub comment on PR #{pr_number}")
+        # Cap at 20 files (largest by additions first) if over 100
+        files = diff_result.files
+        if len(files) > 100:
+            files = sorted(files, key=lambda f: f.additions, reverse=True)[:20]
+            await client.post_comment(
+                repo_full_name, pr_number,
+                "**CodeSense**: This PR has over 100 changed files. "
+                "Reviewing the 20 largest files by additions only."
+            )
+            from app.github.models import DiffResult
+            diff_result = DiffResult(
+                files=files,
+                total_additions=sum(f.additions for f in files),
+                total_deletions=sum(f.deletions for f in files),
+            )
+
+        reviewer = LLMReviewer()
+        all_comments = reviewer.review_pr(diff_result, pr_title, pr_body)
+        summary, verdict = reviewer.generate_summary(all_comments, diff_result)
+
+        duration_ms = _now_ms() - start_ms
+        logger.info(f"PR #{pr_number}: {len(all_comments)} comments, verdict={verdict}, "
+                    f"duration={duration_ms}ms")
+
+        # Format comments for GitHub PR review
+        github_comments = []
+        for c in all_comments:
+            severity_prefix = {
+                "critical": "🔴 **Critical**",
+                "warning": "🟠 **Warning**",
+                "suggestion": "🔵 **Suggestion**",
+                "info": "ℹ️ **Info**",
+            }.get(c.get("severity", "info"), "ℹ️ **Info**")
+
+            body = (
+                f"{severity_prefix} [{c.get('category', 'style').upper()}]: "
+                f"**{c.get('title', '')}**\n\n{c.get('body', '')}"
+            )
+            github_comments.append({
+                "path": c["file_path"],
+                "line": c["line"],
+                "body": body,
+            })
+
+        await client.post_review(
+            repo_full_name, pr_number, commit_sha,
+            github_comments, summary, verdict
+        )
+        logger.info(f"Posted review on PR #{pr_number}")
+
+        # Persist completed review
+        if review_id is not None:
+            try:
+                await reviews_col.update_one(
+                    {"_id": review_id},
+                    {"$set": {
+                        "status": "completed",
+                        "comments": all_comments,
+                        "summary": summary,
+                        "review_duration_ms": duration_ms,
+                    }}
+                )
+            except Exception:
+                logger.warning("Failed to update review status in MongoDB")
 
     except Exception as e:
-        logger.error(f"Error in handle_pull_request: {e}", exc_info=True)
+        logger.error(f"Review failed for PR #{pr_number}: {e}", exc_info=True)
+        try:
+            await client.post_comment(
+                repo_full_name, pr_number,
+                f"**CodeSense**: Review failed with an unexpected error. "
+                f"The team has been notified.\n\n`{type(e).__name__}: {e}`"
+            )
+        except Exception:
+            pass
+
+        if review_id is not None:
+            try:
+                await reviews_col.update_one(
+                    {"_id": review_id},
+                    {"$set": {"status": "failed"}}
+                )
+            except Exception:
+                pass
+
+
+def _now_ms() -> int:
+    import time
+    return int(time.time() * 1000)
 
 
 async def handle_issue_comment(payload: dict):
