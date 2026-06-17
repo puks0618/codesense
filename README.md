@@ -10,8 +10,7 @@ CodeSense is a GitHub App that automatically reviews every pull request using Cl
 
 > Install the app → open a PR → get a review like this in under 60 seconds:
 
-![<img width="1467" height="800" alt="image" src="https://github.com/user-attachments/assets/118cbb51-e68b-44a9-aefb-1300789e9348" />
-](https://codesense-alpha.vercel.app)
+(https://codesense-alpha.vercel.app)
 
 **Live dashboard:** https://codesense-alpha.vercel.app
 
